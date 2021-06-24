@@ -22,8 +22,10 @@ import java.nio.file.FileSystem
 import java.nio.file.FileSystems
 import java.nio.file.Files
 import java.nio.file.LinkOption
+import java.nio.file.NoSuchFileException
 import java.nio.file.Path
 import java.nio.file.PathMatcher
+import java.nio.file.Paths
 import java.util.concurrent.ExecutorService
 
 import groovy.transform.CompileStatic
@@ -35,6 +37,8 @@ import nextflow.Global
 import nextflow.Session
 import nextflow.extension.FilesEx
 import nextflow.file.FileHelper
+import nextflow.util.PathTrie
+import org.apache.commons.lang.StringUtils
 /**
  * Implements the {@code publishDir} directory. It create links or copies the output
  * files of a given task to a user specified directory.
@@ -174,9 +178,34 @@ class PublishDir {
         /*
          * iterate over the file parameter and publish each single file
          */
-        for( Path value : files ) {
+        for( Path value : pathsTrie(files) ) {
             apply1(value, inProcess)
         }
+    }
+
+    /**
+     * Find out only path not overlapping each other using prefix tree.
+     * This is require to avoid copy multiple times the same files, when
+     * the output declares both directory and files nested in the same directory.
+     *
+     * See also https://github.com/nextflow-io/nextflow/issues/2177
+     *
+     * @param files A collection of files. NOTE: MUST be local files. Remote file scheme e.g. S# is not supported
+     * @return
+     */
+    protected List<Path> pathsTrie(Collection<Path> files) {
+        if( !files )
+            return Collections.emptyList()
+        if( files.first().fileSystem != FileSystems.default )
+            throw new  IllegalArgumentException("Unexpected file system scheme: ${files.first().scheme} - offending path: ${files.first()}")
+        final trie = new PathTrie()
+        for( Path it : files )
+            trie.add(it)
+        // convert to path
+        final result = new ArrayList<Path>((files.size()))
+        for( String it :  trie.longest() )
+            result.add(Paths.get(it))
+        return result
     }
 
     void apply( Set<Path> files, Path sourceDir ) {
@@ -274,12 +303,44 @@ class PublishDir {
             processFileImpl(source, destination)
         }
         catch( FileAlreadyExistsException e ) {
+            // make sure destination and source does not overlap
+            // see https://github.com/nextflow-io/nextflow/issues/2177
+            if( checkOverlap(source,destination)) 
+                return
+            
             if( !overwrite )
                 return
 
             FileHelper.deletePath(destination)
             processFileImpl(source, destination)
         }
+    }
+
+    private String real0(Path p) {
+        try {
+            return p.toRealPath().toString()
+        }
+        catch (NoSuchFileException e) {
+            return p.toString()
+        }
+    }
+
+    protected boolean checkOverlap(Path source, Path target) {
+        if( source.fileSystem!=target.fileSystem )
+            return false
+
+        final t1 = real0(target)
+        final s1 = real0(source)
+        final prefix = StringUtils.getCommonPrefix([t1,s1] as String[])
+        if( prefix ) {
+            def msg = "Refuse to publish file since source and destination paths overlap! \n- offending file  : $target"
+            if( t1 != target.toString() )
+                msg += "\n- real destination: $t1"
+            msg += "\n- source path     : $source"
+            log.warn1(msg)
+            return true
+        }
+        return false
     }
 
     @CompileStatic

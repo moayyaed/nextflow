@@ -302,4 +302,44 @@ class PublishDirTest extends Specification {
         folder?.deleteDir()
 
     }
+
+    def 'should only return not overlapping paths' () {
+        given:
+        def publisher = new PublishDir()
+
+        expect:
+        publisher.pathsTrie( GIVEN.collect{Paths.get(it)} ).collect{it.toString()} == EXPECT
+
+        where:
+        GIVEN                                               | EXPECT
+        ['/foo/bar.txt','/foo/bar.txt', '/foo']             | ['/foo']
+        ['/foo/bar.txt','/foo/bar.txt', '/foo/delta/xx']    | ['/foo']
+        ['/foo/x1','/foo/x1/y', '/bar/x2']                  | ['/foo/x1','/bar/x2']
+    }
+
+    def 'should detected overlapping paths' () {
+        given:
+        def folder = Files.createTempDirectory('test')
+        def foo = folder.resolve('foo'); foo.mkdir()
+        def bar = folder.resolve('bar'); bar.mkdir()
+        and:
+        def publisher = new PublishDir()
+
+        expect:
+        !publisher.checkOverlap(Paths.get('hola'), folder)
+        publisher.checkOverlap(foo, folder)
+        publisher.checkOverlap(foo, bar)
+
+        // create a link in the current path ie. outside the temp `folder`
+        // however the link point to a path in the temp `folder`
+        // therefore the overlap should be detected
+        when:
+        def link = Files.createSymbolicLink(Paths.get("link-${System.currentTimeMillis()}.txt"), foo)
+        then:
+        publisher.checkOverlap(link, bar)
+
+        cleanup:
+        link?.delete()
+        folder?.deleteDir()
+    }
 }
